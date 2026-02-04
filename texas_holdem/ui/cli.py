@@ -58,6 +58,10 @@ class CLI:
         self.turn_countdown = 15       # 回合倒计时秒数
         self.countdown_active = False  # 倒计时是否进行中
         
+        # 鲨鱼AI对手追踪数据
+        self.shark_opponent_data = {}  # {player_name: {stats}}
+        self.shark_adaptation_active = False  # 是否已激活调整
+        
         # 打法风格参数配置
         self.style_configs = {
             'TAG': {  # 紧凶 - Tight Aggressive
@@ -99,6 +103,18 @@ class CLI:
                 'raise_preflop': 0.12,
                 'bet_postflop': 0.25,
                 'fold_to_raise': 0.30,
+            },
+            'SHARK': {  # 鲨鱼 - 自适应学习AI
+                'vpip_range': (22, 28),      # GTO标准的入池率
+                'pfr_range': (18, 24),       # GTO标准的加注率
+                'af_factor': 2.0,             # 平衡型激进因子
+                'bluff_freq': 0.20,           # 初始诈唬频率（会根据对手调整）
+                'call_preflop': 0.25,         # 翻牌前跟注倾向
+                'raise_preflop': 0.28,        # 翻牌前加注倾向
+                'bet_postflop': 0.45,         # 翻牌后下注倾向
+                'fold_to_raise': 0.45,        # 面对加注弃牌率
+                'adaptation_start': 20,       # 20手后开始调整
+                'learning_rate': 0.1,         # 学习速率
             }
         }
 
@@ -222,18 +238,26 @@ class CLI:
         print(f"\n游戏配置: 共{total_players}人 (AI×{ai_count}, 人类×{human_count})")
         print("-"*50)
         
-        # 添加AI玩家（随机分配风格）
+        # 添加AI玩家（固定1名鲨鱼，其余随机分配风格）
         reserved_names = set()
         available_styles = ['TAG', 'LAG', 'LAP', 'LP']
         style_names = {'TAG': '紧凶', 'LAG': '松凶', 'LAP': '紧弱', 'LP': '松弱'}
         
         for i in range(1, ai_count + 1):
-            style = random.choice(available_styles)
-            style_cn = style_names[style]
+            if i == 1:
+                # 第一个AI固定为鲨鱼
+                style = 'SHARK'
+                style_cn = '鲨鱼'
+            else:
+                style = random.choice(available_styles)
+                style_cn = style_names[style]
             ai_name = f"电脑{i}号[{style_cn}]"
             names.append(ai_name)
             reserved_names.add(ai_name)
-            print(f"玩家{i}: {ai_name} (AI-{style_cn})")
+            if style == 'SHARK':
+                print(f"玩家{i}: {ai_name} (AI-{style_cn}) - 自适应学习AI")
+            else:
+                print(f"玩家{i}: {ai_name} (AI-{style_cn})")
         
         # 添加人类玩家
         for i in range(1, human_count + 1):
@@ -521,7 +545,7 @@ class CLI:
         human_count = 0
         
         # 风格名称映射（中文->英文）
-        style_map = {'紧凶': 'TAG', '松凶': 'LAG', '紧弱': 'LAP', '松弱': 'LP'}
+        style_map = {'紧凶': 'TAG', '松凶': 'LAG', '紧弱': 'LAP', '松弱': 'LP', '鲨鱼': 'SHARK'}
         
         for player in self.game_engine.players:
             if player.name.startswith("电脑"):
@@ -541,6 +565,9 @@ class CLI:
 
         # 初始化对手统计数据
         self._initialize_opponent_stats(self.game_engine.players)
+        
+        # 初始化鲨鱼AI的对手追踪
+        self._initialize_shark_tracking(self.game_engine.players)
         
         # 初始化玩家详细统计
         self._initialize_player_stats()
@@ -566,7 +593,8 @@ class CLI:
             'TAG': '紧凶 (Tight Aggressive) - 精选手牌，积极加注',
             'LAG': '松凶 (Loose Aggressive) - 多玩手牌，持续施压',
             'LAP': '紧弱 (Tight Passive) - 精选手牌，跟注为主',
-            'LP': '松弱 (Loose Passive) - 多玩手牌，被动跟注'
+            'LP': '松弱 (Loose Passive) - 多玩手牌，被动跟注',
+            'SHARK': '鲨鱼 (Adaptive AI) - 初始GTO打法，20手后根据对手风格自适应调整'
         }
         for player in self.game_engine.players:
             if player.is_ai:
@@ -1139,6 +1167,13 @@ class CLI:
         elif won_hand:
             # 不摊牌获胜
             stats['wins_without_showdown'] += 1
+        
+        # 更新鲨鱼AI的对手追踪数据
+        self._update_shark_tracking(
+            player_name, action, street, 
+            is_bluff=is_bluff,
+            facing_cbet=cbet_opportunity
+        )
 
     def _print_stats_report(self):
         """输出详细玩家统计报告 - 包含多项技术指标"""
@@ -2827,7 +2862,7 @@ class CLI:
         """
         根据玩家风格选择AI行动
         
-        支持风格：TAG(紧凶)、LAG(松凶)、LAP(紧弱)、LP(松弱)
+        支持风格：TAG(紧凶)、LAG(松凶)、LAP(紧弱)、LP(松弱)、SHARK(鲨鱼)
         
         Returns:
             (行动, 金额) 元组
@@ -2836,13 +2871,50 @@ class CLI:
 
         # 获取玩家风格配置
         style = getattr(player, 'ai_style', 'LAG')
-        config = self.style_configs.get(style, self.style_configs['LAG'])
+        
+        # 鲨鱼AI使用动态调整后的配置
+        if style == 'SHARK':
+            config = self._get_shark_adjusted_config()
+            # 使用GTO基准的 tightness_factor
+            tightness_factor = 0.02  # 接近GTO，稍微紧一点
+        else:
+            config = self.style_configs.get(style, self.style_configs['LAG'])
+            # 根据风格调整手牌强度阈值
+            tightness_factor = {
+                'TAG': 0.10,   # 紧凶 - 大幅提高标准
+                'LAG': -0.05,  # 松凶 - 降低标准
+                'LAP': 0.08,   # 紧弱 - 提高标准
+                'LP': -0.08    # 松弱 - 降低标准
+            }.get(style, 0)
 
         # === 翻牌前严格起手牌选择（紧风格核心逻辑）===
         is_preflop = (game_state == GameState.PRE_FLOP or 
                       (isinstance(game_state, str) and 'pre' in game_state.lower()))
         
-        if is_preflop and style in ['TAG', 'LAP']:
+        if is_preflop and style == 'SHARK':
+            # 鲨鱼AI：GTO标准的起手牌选择，玩前25-30%的牌（手牌强度 >= 0.48）
+            # 参考：AA=0.9, KK=0.88, QQ=0.86, JJ=0.84, TT=0.82
+            #       99=0.71, 88=0.70, AKs=0.66, AQs=0.64, AKo=0.62
+            #       AJo=0.58, KQs=0.58, ATo=0.52, KJo=0.50, QJs=0.48 - GTO底线
+            if hand_strength < 0.48:
+                # 弱牌：通常弃牌
+                if player.is_big_blind and amount_to_call <= 10:
+                    if amount_to_call > 0:
+                        return 'call', 0
+                    else:
+                        return 'check', 0
+                else:
+                    return 'fold', 0
+            # 中等牌力（0.48-0.58）根据位置调整
+            elif hand_strength < 0.58:
+                # 后位可以玩更多牌，前位收紧
+                is_late_position = player.is_dealer or player.is_small_blind
+                if not is_late_position and amount_to_call > 20:
+                    # 前位面对加注，放弃边缘牌
+                    return 'fold', 0
+            # 强牌（>=0.58）继续后续逻辑
+        
+        elif is_preflop and style in ['TAG', 'LAP']:
             # 紧风格：只玩前15-20%最强牌（手牌强度 >= 0.58）
             # 参考：AA=0.9, KK=0.88, QQ=0.86, JJ=0.84, TT=0.82
             #       99=0.71, 88=0.70, AKs=0.66, AQs=0.64, AKo=0.62
@@ -2887,20 +2959,16 @@ class CLI:
             'all_in': 0
         }
         
-        # 根据风格调整手牌强度阈值
-        tightness_factor = {
-            'TAG': 0.10,   # 紧凶 - 大幅提高标准
-            'LAG': -0.05,  # 松凶 - 降低标准
-            'LAP': 0.08,   # 紧弱 - 提高标准
-            'LP': -0.08    # 松弱 - 降低标准
-        }.get(style, 0)
-        
         # 调整后的手牌强度阈值
         adjusted_strength = hand_strength - tightness_factor
 
         # 根据风格选择基础权重模板
         if adjusted_strength > 0.75:  # 超强牌
-            if style in ['TAG', 'LAG']:  # 凶的风格
+            if style == 'SHARK':  # 鲨鱼 - GTO平衡策略
+                action_weights['raise'] = 0.50  # 平衡的价值加注
+                action_weights['bet'] = 0.30
+                action_weights['call'] = 0.20
+            elif style in ['TAG', 'LAG']:  # 凶的风格
                 action_weights['raise'] = 0.55
                 action_weights['bet'] = 0.30
                 action_weights['call'] = 0.15
@@ -2914,7 +2982,11 @@ class CLI:
                 action_weights['bet'] = 0.40
                 action_weights['call'] = 0.30
         elif adjusted_strength > 0.55:  # 强牌
-            if style in ['TAG', 'LAG']:  # 凶的风格
+            if style == 'SHARK':  # 鲨鱼 - GTO平衡
+                action_weights['raise'] = 0.35
+                action_weights['bet'] = 0.35
+                action_weights['call'] = 0.30
+            elif style in ['TAG', 'LAG']:  # 凶的风格
                 action_weights['raise'] = 0.40
                 action_weights['bet'] = 0.35
                 action_weights['call'] = 0.25
@@ -2928,7 +3000,12 @@ class CLI:
                 action_weights['bet'] = 0.30
                 action_weights['call'] = 0.55
         elif adjusted_strength > 0.40:  # 中等牌
-            if style == 'TAG':  # 紧凶 - 弃掉边缘牌
+            if style == 'SHARK':  # 鲨鱼 - GTO平衡，中等牌也有诈唬
+                action_weights['raise'] = 0.20
+                action_weights['bet'] = 0.30
+                action_weights['call'] = 0.35
+                action_weights['fold'] = 0.15
+            elif style == 'TAG':  # 紧凶 - 弃掉边缘牌
                 action_weights['fold'] = 0.20
                 action_weights['raise'] = 0.15
                 action_weights['bet'] = 0.25
@@ -3338,6 +3415,152 @@ class CLI:
                     'voluntary_put': 0,
                     'total_hands': 0
                 }
+
+    def _initialize_shark_tracking(self, players: List[Player]):
+        """
+        初始化鲨鱼AI的对手追踪数据
+        
+        Args:
+            players: 玩家列表（不包括鲨鱼自己）
+        """
+        self.shark_opponent_data = {}
+        for player in players:
+            if player.name != '鲨鱼':  # 不追踪自己
+                self.shark_opponent_data[player.name] = {
+                    'hands_observed': 0,      # 观察到的手牌数
+                    'folds': 0,               # 弃牌次数
+                    'calls': 0,               # 跟注次数
+                    'raises': 0,              # 加注次数
+                    'bluffs_detected': 0,     # 检测到的诈唬次数
+                    'bluff_opportunities': 0, # 诈唬机会次数
+                    'fold_to_cbet': 0,        # 面对C-bet弃牌次数
+                    'cbet_opportunities': 0,  # C-bet机会次数
+                    'showdown_wins': 0,       # 摊牌获胜次数
+                    'showdowns': 0,           # 摊牌次数
+                    # 计算出的倾向（0-1之间）
+                    'fold_tendency': 0.5,     # 弃牌倾向（高=容易弃牌）
+                    'bluff_tendency': 0.5,    # 诈唬倾向（高=喜欢诈唬）
+                    'calling_tendency': 0.5,  # 跟注倾向（高=跟注站）
+                }
+        self.shark_adaptation_active = False
+
+    def _update_shark_tracking(self, player_name: str, action: str, 
+                               street: str, is_bluff: bool = False,
+                               facing_cbet: bool = False):
+        """
+        更新鲨鱼AI追踪的对手数据
+        
+        Args:
+            player_name: 玩家名称
+            action: 行动
+            street: 下注轮次
+            is_bluff: 是否是诈唬
+            facing_cbet: 是否面对C-bet
+        """
+        if player_name not in self.shark_opponent_data:
+            return
+        
+        data = self.shark_opponent_data[player_name]
+        data['hands_observed'] += 1
+        
+        # 记录行动
+        if action == 'fold':
+            data['folds'] += 1
+            if facing_cbet:
+                data['fold_to_cbet'] += 1
+        elif action in ['call']:
+            data['calls'] += 1
+        elif action in ['raise', 'bet']:
+            data['raises'] += 1
+            if is_bluff:
+                data['bluffs_detected'] += 1
+        
+        if facing_cbet:
+            data['cbet_opportunities'] += 1
+        
+        # 更新倾向值（每10手更新一次）
+        if data['hands_observed'] >= 10 and data['hands_observed'] % 5 == 0:
+            self._calculate_opponent_tendencies(player_name)
+
+    def _calculate_opponent_tendencies(self, player_name: str):
+        """
+        计算对手的倾向值
+        
+        Args:
+            player_name: 玩家名称
+        """
+        if player_name not in self.shark_opponent_data:
+            return
+        
+        data = self.shark_opponent_data[player_name]
+        hands = data['hands_observed']
+        
+        if hands < 5:  # 数据不足
+            return
+        
+        # 弃牌倾向（0-1，0.5为基准）
+        fold_rate = data['folds'] / hands
+        data['fold_tendency'] = min(1.0, max(0.0, fold_rate * 2))  # 归一化
+        
+        # 诈唬倾向
+        if data['raises'] > 0:
+            bluff_rate = data['bluffs_detected'] / data['raises']
+            data['bluff_tendency'] = min(1.0, bluff_rate * 3)  # 放大系数
+        
+        # 跟注倾向
+        if hands > data['folds']:
+            calling_rate = data['calls'] / (hands - data['folds'])
+            data['calling_tendency'] = min(1.0, max(0.0, calling_rate))
+
+    def _get_shark_adjusted_config(self) -> dict:
+        """
+        获取鲨鱼AI根据对手调整后的配置
+        
+        Returns:
+            调整后的风格配置
+        """
+        # 获取基础GTO配置
+        base_config = self.style_configs['SHARK'].copy()
+        
+        # 如果数据不足20手，返回GTO配置
+        if not self.shark_adaptation_active:
+            total_hands = sum(d['hands_observed'] for d in self.shark_opponent_data.values())
+            if total_hands < base_config['adaptation_start']:
+                return base_config
+            else:
+                self.shark_adaptation_active = True
+                print("\n[系统] 鲨鱼AI开始调整策略...")
+        
+        if not self.shark_opponent_data:
+            return base_config
+        
+        # 计算所有对手的平均倾向
+        avg_fold = sum(d['fold_tendency'] for d in self.shark_opponent_data.values()) / len(self.shark_opponent_data)
+        avg_bluff = sum(d['bluff_tendency'] for d in self.shark_opponent_data.values()) / len(self.shark_opponent_data)
+        avg_call = sum(d['calling_tendency'] for d in self.shark_opponent_data.values()) / len(self.shark_opponent_data)
+        
+        adjusted = base_config.copy()
+        
+        # 对手容易弃牌 -> 增加诈唬频率，减少入池率（更紧更凶）
+        if avg_fold > 0.6:  # 对手容易弃牌
+            adjusted['bluff_freq'] = min(0.5, base_config['bluff_freq'] + 0.15)
+            adjusted['bet_postflop'] = min(0.7, base_config['bet_postflop'] + 0.15)
+            adjusted['af_factor'] = base_config['af_factor'] + 0.5
+        
+        # 对手喜欢诈唬 -> 打得更紧，增加抓诈频率
+        if avg_bluff > 0.4:  # 对手诈唬多
+            adjusted['vpip_range'] = (max(15, base_config['vpip_range'][0] - 5), 
+                                       max(20, base_config['vpip_range'][1] - 5))
+            adjusted['call_preflop'] = min(0.4, base_config['call_preflop'] + 0.1)
+            adjusted['fold_to_raise'] = max(0.3, base_config['fold_to_raise'] - 0.1)
+        
+        # 对手是跟注站 -> 减少诈唬，增加价值下注
+        if avg_call > 0.5:  # 对手跟注多
+            adjusted['bluff_freq'] = max(0.1, base_config['bluff_freq'] - 0.1)
+            adjusted['bet_postflop'] = base_config['bet_postflop'] + 0.1
+            adjusted['af_factor'] = base_config['af_factor'] + 0.3
+        
+        return adjusted
 
     def _update_opponent_stats(self, player_name: str, action: str, street: str, amount: int = 0):
         """
