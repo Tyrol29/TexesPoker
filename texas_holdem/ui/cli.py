@@ -15,6 +15,7 @@ from texas_holdem.core.card import Card
 from texas_holdem.game.game_engine import GameEngine
 from texas_holdem.game.betting import BettingRound
 from texas_holdem.utils.constants import Action, GameState, SMALL_BLIND, BIG_BLIND, INITIAL_CHIPS
+from texas_holdem.utils.save_manager import SaveManager, GameStateEncoder, GameStateDecoder
 
 class CLI:
     """命令行界面类"""
@@ -393,10 +394,24 @@ class CLI:
         print(f"\n可用行动: {', '.join(available_actions)}")
 
         while True:
-            action_input = input("请选择行动: ").strip().lower()
+            action_input = input("请选择行动 (输入 'save' 保存游戏): ").strip().lower()
 
             if not action_input:
                 print("请输入行动")
+                continue
+            
+            # 处理保存命令
+            if action_input == 'save' or action_input == 's':
+                print("\n[保存游戏]")
+                self.save_game_menu()
+                print("\n继续游戏...")
+                print(f"\n{player.name} 的回合")
+                print(f"手牌: {player.hand}")
+                print(f"筹码: {player.chips}")
+                print(f"当前下注额: {betting_round.game_state.current_bet}")
+                if amount_to_call > 0:
+                    print(f"需要跟注: {amount_to_call}")
+                print(f"\n可用行动: {', '.join(available_actions)}")
                 continue
 
             # 解析行动
@@ -1360,32 +1375,400 @@ class CLI:
         self.display_welcome()
         
         while True:
+            # 检查是否有存档
+            has_saves = SaveManager.list_saves()
+            
             print("\n" + "=" * 60)
             print("德州扑克主菜单")
             print("=" * 60)
             print("1. 开始新游戏 (交互模式)")
-            print("2. 运行测试游戏 (自动模式)")
-            print("3. 游戏规则说明")
-            print("4. 退出")
+            if has_saves:
+                print("2. 继续游戏 (加载存档)")
+            else:
+                print("2. 继续游戏 (无存档)")
+            print("3. 运行测试游戏 (自动模式)")
+            print("4. 游戏规则说明")
+            print("5. 退出")
             print("=" * 60)
 
-            choice = input("请选择 (1-4): ").strip()
+            choice = input("请选择 (1-5): ").strip()
 
             if choice == '1':
                 self.run_interactive_game()
             elif choice == '2':
+                if has_saves:
+                    self.load_game_menu()
+                else:
+                    print("\n暂无存档，请先开始新游戏!")
+            elif choice == '3':
                 try:
                     hands = int(input("运行几手牌? (默认 5): ").strip() or "5")
                     self.run_auto_game(hands)
                 except ValueError:
                     print("请输入有效数字")
-            elif choice == '3':
-                self.display_rules()
             elif choice == '4':
+                self.display_rules()
+            elif choice == '5':
                 print("谢谢游玩!")
                 break
             else:
                 print("无效选择，请重试")
+
+    def save_game_menu(self):
+        """显示保存游戏菜单"""
+        print("\n" + "=" * 60)
+        print("保存游戏")
+        print("=" * 60)
+        
+        # 显示现有存档
+        saves = SaveManager.list_saves()
+        for slot in range(1, 4):
+            if slot in saves:
+                print(f"{slot}. 存档{slot} - {saves[slot]}")
+            else:
+                print(f"{slot}. 空存档槽")
+        print("0. 取消保存")
+        print("=" * 60)
+        
+        choice = input("请选择存档槽位 (0-3): ").strip()
+        if choice in ['1', '2', '3']:
+            slot = int(choice)
+            if self.save_game(slot):
+                print(f"\n游戏已保存到存档{slot}!")
+            else:
+                print("\n保存失败，请重试!")
+        elif choice == '0':
+            print("\n已取消保存")
+        else:
+            print("\n无效选择")
+    
+    def save_game(self, slot: int = 1) -> bool:
+        """
+        保存当前游戏状态
+        
+        Args:
+            slot: 存档槽位（1-3）
+        
+        Returns:
+            是否保存成功
+        """
+        if not self.game_engine:
+            print("没有正在进行的游戏!")
+            return False
+        
+        try:
+            # 构建存档数据
+            save_data = {
+                'version': '1.2.0',
+                'player_names': self.player_names,
+                'player_stats': self.player_stats,
+                'total_hands': self.total_hands,
+                'player_styles': self.player_styles,
+                'initial_ai_count': self.initial_ai_count,
+                'blind_level': self.blind_level,
+                'blind_doubled': self.blind_doubled,
+                'game_engine': GameStateEncoder.encode_game_engine(
+                    self.game_engine, 
+                    is_mid_hand=self._is_mid_hand()
+                )
+            }
+            
+            return SaveManager.save_game(save_data, slot)
+        except Exception as e:
+            print(f"保存失败: {e}")
+            return False
+    
+    def _is_mid_hand(self) -> bool:
+        """检查是否在手牌进行中"""
+        if not self.game_engine:
+            return False
+        # 如果有玩家手中有牌，说明手牌进行中
+        for player in self.game_engine.players:
+            if player.hand.get_cards():
+                return True
+        return False
+    
+    def load_game_menu(self):
+        """显示加载游戏菜单"""
+        print("\n" + "=" * 60)
+        print("继续游戏 - 选择存档")
+        print("=" * 60)
+        
+        # 显示存档列表
+        saves = SaveManager.list_saves()
+        for slot in range(1, 4):
+            if slot in saves:
+                print(f"{slot}. 存档{slot} - {saves[slot]}")
+            else:
+                print(f"{slot}. 空存档槽")
+        print("0. 返回主菜单")
+        print("=" * 60)
+        
+        choice = input("请选择存档 (0-3): ").strip()
+        if choice in ['1', '2', '3']:
+            slot = int(choice)
+            if slot in saves:
+                if self.load_game(slot):
+                    print(f"\n存档{slot}加载成功!")
+                    # 进入游戏主循环
+                    self._continue_game_loop()
+                else:
+                    print("\n加载失败!")
+            else:
+                print(f"\n存档{slot}不存在!")
+        elif choice == '0':
+            print("\n返回主菜单")
+        else:
+            print("\n无效选择")
+    
+    def load_game(self, slot: int = 1) -> bool:
+        """
+        加载游戏状态
+        
+        Args:
+            slot: 存档槽位（1-3）
+        
+        Returns:
+            是否加载成功
+        """
+        try:
+            save_data = SaveManager.load_game(slot)
+            if not save_data:
+                print(f"存档{slot}不存在!")
+                return False
+            
+            # 恢复 CLI 状态
+            self.player_names = save_data.get('player_names', [])
+            self.player_stats = save_data.get('player_stats', {})
+            self.total_hands = save_data.get('total_hands', 0)
+            self.player_styles = save_data.get('player_styles', {})
+            self.initial_ai_count = save_data.get('initial_ai_count', 0)
+            self.blind_level = save_data.get('blind_level', 1)
+            self.blind_doubled = save_data.get('blind_doubled', False)
+            
+            # 恢复游戏引擎
+            engine_data = save_data.get('game_engine', {})
+            players_data = engine_data.get('players', [])
+            
+            # 重建玩家列表
+            from ..core.player import Player
+            players = []
+            for p_data in players_data:
+                player = GameStateDecoder.decode_player(p_data)
+                players.append(player)
+            
+            # 重建游戏引擎
+            from ..game.game_engine import GameEngine
+            from ..utils import constants as _constants
+            
+            # 设置盲注级别
+            if self.blind_level > 1:
+                _constants.SMALL_BLIND = 10 * (2 ** (self.blind_level - 1))
+                _constants.BIG_BLIND = 20 * (2 ** (self.blind_level - 1))
+            
+            self.game_engine = GameEngine([p.name for p in players], players[0].chips if players else 4000)
+            self.game_engine.players = players
+            
+            # 恢复游戏状态
+            game_state_data = engine_data.get('game_state', {})
+            self.game_engine.game_state = GameStateDecoder.decode_game_state(game_state_data, players)
+            
+            # 初始化其他组件
+            from ..game.betting import BettingRound
+            self.game_engine.betting_round = BettingRound(self.game_engine.game_state)
+            self.game_engine.deck.reset()
+            
+            # 恢复 AI 风格和统计
+            for player in self.game_engine.players:
+                if player.is_ai and player.name in self.player_styles:
+                    player.ai_style = self.player_styles[player.name]
+            
+            self._initialize_opponent_stats(self.game_engine.players)
+            
+            return True
+        except Exception as e:
+            print(f"加载失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _continue_game_loop(self):
+        """继续已加载的游戏"""
+        if not self.game_engine:
+            print("没有加载的游戏!")
+            return
+        
+        game_state = self.game_engine.game_state
+        
+        print(f"\n{'='*50}")
+        print("继续游戏!")
+        print(f"{'='*50}")
+        print(f"当前手牌: 第 {game_state.hand_number} 手")
+        print(f"当前盲注: 小盲{_constants.SMALL_BLIND}, 大盲{_constants.BIG_BLIND}")
+        
+        # 显示当前状态
+        self.display_table(game_state)
+        
+        # 询问是否继续当前手牌或开始新手牌
+        if self._is_mid_hand():
+            print("\n当前有一手牌正在进行中...")
+            choice = input("是否继续这手牌? (y/n): ").strip().lower()
+            if choice == 'n':
+                # 结束当前手牌，开始新手牌
+                self._cleanup_current_hand()
+        
+        # 进入游戏主循环
+        self._run_game_loop()
+    
+    def _cleanup_current_hand(self):
+        """清理当前进行中的手牌（当玩家选择放弃时）"""
+        if not self.game_engine:
+            return
+        
+        # 清空所有玩家的手牌和下注
+        for player in self.game_engine.players:
+            # 返还已下注的筹码
+            if player.bet_amount > 0:
+                player.chips += player.bet_amount
+            player.reset_for_new_hand()
+        
+        # 清空公共牌和底池
+        self.game_engine.game_state.table.reset()
+        self.game_engine.game_state.reset_for_new_hand()
+    
+    def _run_game_loop(self):
+        """运行游戏主循环（用于继续游戏）"""
+        game_state = self.game_engine.game_state
+        hand_number = game_state.hand_number
+        
+        while True:
+            hand_number += 1
+            self.total_hands += 1
+            
+            print(f"\n{'='*50}")
+            print(f"第 {hand_number} 手牌")
+            print(f"{'='*50}")
+            
+            # 开始新的一手牌
+            self.game_engine.start_new_hand()
+            self._clear_pending_actions()
+            self.current_stage_name = "翻牌前"
+            
+            # 更新每个玩家的手牌计数
+            for player in game_state.players:
+                if player.name in self.player_stats:
+                    self.player_stats[player.name]['hands_played'] += 1
+            
+            self.display_table(game_state)
+            
+            # 添加保存选项提示
+            print("\n[提示] 游戏中可随时输入 'save' 保存游戏")
+            
+            # 翻牌前下注
+            if not self._run_betting_round_interactive():
+                active_players = [p for p in game_state.players if p.chips > 0]
+                if len(active_players) < 2:
+                    break
+                hand_finished = True
+            else:
+                hand_finished = False
+            
+            if not hand_finished:
+                # 发翻牌
+                self.game_engine.deal_flop()
+                game_state.advance_stage()
+                self.current_stage_name = "翻牌圈"
+                self.display_table(game_state)
+                
+                if not self._run_betting_round_interactive():
+                    active_players = [p for p in game_state.players if p.chips > 0]
+                    if len(active_players) < 2:
+                        break
+                    hand_finished = True
+            
+            if not hand_finished:
+                # 发转牌
+                self.game_engine.deal_turn()
+                game_state.advance_stage()
+                self.current_stage_name = "转牌圈"
+                self.display_table(game_state)
+                
+                if not self._run_betting_round_interactive():
+                    active_players = [p for p in game_state.players if p.chips > 0]
+                    if len(active_players) < 2:
+                        break
+                    hand_finished = True
+            
+            if not hand_finished:
+                # 发河牌
+                self.game_engine.deal_river()
+                game_state.advance_stage()
+                self.current_stage_name = "河牌圈"
+                self.display_table(game_state)
+                
+                if not self._run_betting_round_interactive():
+                    active_players = [p for p in game_state.players if p.chips > 0]
+                    if len(active_players) < 2:
+                        break
+                else:
+                    # 摊牌
+                    self._run_showdown()
+            
+            # 检查并淘汰筹码归零的电脑玩家
+            eliminated = self._eliminate_broke_players()
+            if eliminated:
+                print(f"\n{'='*50}")
+                print("[淘汰通知]")
+                for name, is_ai in eliminated:
+                    player_type = "电脑" if is_ai else "玩家"
+                    print(f"  {player_type} {name} 筹码归零，被淘汰！")
+                print(f"{'='*50}")
+                
+                remaining_ai = len([p for p in game_state.players if p.is_ai])
+                remaining_human = len([p for p in game_state.players if not p.is_ai])
+                print(f"\n剩余玩家: 电脑x{remaining_ai}, 人类x{remaining_human}")
+                
+                eliminated_ai_count = sum(1 for _, is_ai in eliminated if is_ai)
+                if eliminated_ai_count > 0 and not self.blind_doubled:
+                    self._increase_blinds()
+                
+                if len(game_state.players) < 2:
+                    print("\n*** 游戏结束：只剩一个玩家！***")
+                    break
+                
+                if remaining_ai == 0 and remaining_human > 0:
+                    print("\n*** 恭喜！所有电脑已被淘汰，人类获胜！***")
+                    break
+                
+                if remaining_human == 0:
+                    print("\n*** 很遗憾，所有人类玩家已被淘汰！***")
+                    break
+            
+            # 每100手输出统计报告
+            if self.total_hands % self.stats_report_interval == 0:
+                print(f"\n{'='*50}")
+                print(f"[系统] 已完成 {self.total_hands} 手牌，输出统计报告...")
+                print(f"{'='*50}")
+                self._print_stats_report()
+                input("\n按回车键继续游戏...")
+            
+            # 检查游戏是否结束
+            active_players = [p for p in game_state.players if p.chips > 0]
+            if len(active_players) < 2:
+                break
+            
+            # 每手牌结束后询问是否保存
+            print("\n" + "-" * 40)
+            save_choice = input("本手牌结束。是否保存游戏? (y/n): ").strip().lower()
+            if save_choice == 'y':
+                self.save_game_menu()
+        
+        # 显示最终结果
+        print(f"\n{'='*50}")
+        print(f"游戏结束! 共进行了 {hand_number} 手牌")
+        if self.total_hands > 0:
+            self._print_stats_report()
+        self._display_final_results()
 
     def get_ai_action(self, player: Player, betting_round: BettingRound) -> tuple:
         """
