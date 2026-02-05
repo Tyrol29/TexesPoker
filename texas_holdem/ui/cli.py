@@ -623,6 +623,12 @@ class CLI:
             self._clear_pending_actions()
             self.current_stage_name = "翻牌前"
             
+            # 重置翻牌前加注者（每手牌重新开始）
+            self.preflop_raiser = None
+            
+            # 重置当前手牌诈唬跟踪
+            self.current_hand_bluffs = {}
+            
             # 更新每个玩家的手牌计数（只要参与了手牌就统计）
             for player in game_state.players:
                 if player.name in self.player_stats:
@@ -764,7 +770,7 @@ class CLI:
         game_state.reset_player_actions()
         
         # 跟踪本圈下注统计
-        preflop_raiser = None  # 翻牌前加注者（用于C-bet统计）
+        # preflop_raiser 现在是实例变量 self.preflop_raiser，跨街道保持
         current_bet_level = 0  # 当前下注级别（用于检测3bet）
         players_acted = []  # 已行动玩家列表（用于偷盲检测）
 
@@ -786,20 +792,26 @@ class CLI:
             street = street_map.get(game_state.state, 'unknown')
             action_str = str(action).lower().replace('action.', '')
             
-            # 检测是否是偷盲位置（CO/BTN/SB位置且前面都弃牌）
+            # 检测是否是偷盲位置（CO/BTN/SB位置且前面都弃牌/limp）
             is_steal_position = False
             if street == 'preflop':
                 position = self._get_position_name(current_player, game_state.players, game_state)
-                # CO( cutoff), BTN(按钮), SB(小盲)是偷盲位置
-                if position in ['CO', 'BTN', 'SB'] and len(players_acted) > 0:
-                    # 检查前面是否都弃牌了
-                    all_folded = all(p_action == 'fold' for p_name, p_action in players_acted)
-                    if all_folded:
+                # CO(cutoff), BTN(按钮), SB(小盲)是偷盲位置
+                # 条件：后位 + 前面没人加注（即可以open raise）
+                if position in ['CO', 'BTN', 'SB']:
+                    # 检查前面是否都弃牌或只是跟注（limp）
+                    if len(players_acted) == 0:
+                        # 第一个行动（比如UTG弃牌后的MP位置）
                         is_steal_position = True
+                    else:
+                        # 检查前面是否都弃牌了
+                        all_folded = all(p_action == 'fold' for p_name, p_action in players_acted)
+                        if all_folded:
+                            is_steal_position = True
             
             # 检测是否是C-bet机会（翻牌前加注者在翻牌圈第一个行动）
             is_cbet_opportunity = False
-            if street == 'flop' and preflop_raiser == current_player.name:
+            if street == 'flop' and self.preflop_raiser == current_player.name:
                 # 翻牌前加注者，且在翻牌圈第一个行动（前面没人下注/加注）
                 # 检查翻牌圈是否已有下注
                 flop_bet_made = any(p.bet_amount > 0 for p in game_state.players if p.is_active)
@@ -819,10 +831,10 @@ class CLI:
                 # 记录行动
                 players_acted.append((current_player.name, action_str))
                 
-                # 跟踪翻牌前加注者
+                # 跟踪翻牌前加注者（保存到实例变量）
                 if street == 'preflop' and action_str == 'raise':
                     if current_bet_level == 0:
-                        preflop_raiser = current_player.name
+                        self.preflop_raiser = current_player.name
                     current_bet_level += 1
                 
                 # 格式化行动描述
@@ -865,6 +877,10 @@ class CLI:
                     cbet_opportunity=is_cbet_opportunity,
                     cbet_made=cbet_made
                 )
+                
+                # 如果这是诈唬，记录到当前手牌诈唬跟踪
+                if is_bluff:
+                    self.current_hand_bluffs[current_player.name] = True
             else:
                 print(f"行动失败: {message}")
                 continue
@@ -889,6 +905,9 @@ class CLI:
                         self.player_stats[winner.name]['biggest_win'] = win_amount
                     # 记录不摊牌获胜（其他人都弃牌了）
                     self.player_stats[winner.name]['wins_without_showdown'] += 1
+                    # 如果赢家在本手牌中有诈唬行为，记录诈唬成功
+                    if winner.name in self.current_hand_bluffs:
+                        self.player_stats[winner.name]['bluffs_successful'] += 1
                     # 清零赢家的投入
                     self.player_stats[winner.name]['current_hand_invested'] = 0
                 # 其他玩家的投入已在行动中累计，这里更新损失并清零
@@ -1006,7 +1025,7 @@ class CLI:
 
     def _update_win_loss_stats(self, winnings, game_state):
         """
-        更新最大赢池和损失统计
+        更新最大赢池和损失统计，以及诈唬成功统计
         
         Args:
             winnings: {player: amount} 赢家赢得的金额字典
@@ -1018,6 +1037,10 @@ class CLI:
                 # 更新最大赢池
                 if win_amount > self.player_stats[player.name]['biggest_win']:
                     self.player_stats[player.name]['biggest_win'] = win_amount
+                
+                # 如果赢家在本手牌中有诈唬行为，记录诈唬成功
+                if player.name in self.current_hand_bluffs:
+                    self.player_stats[player.name]['bluffs_successful'] += 1
         
         # 更新输家统计
         for player in game_state.players:
