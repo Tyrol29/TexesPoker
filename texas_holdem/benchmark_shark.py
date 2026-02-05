@@ -46,6 +46,10 @@ class SilentGameRunner:
         # 每手牌的结果记录
         self.hand_results = []
         
+        # VPIP/PFR跟踪（每手牌重置）
+        self.hand_vpip_recorded = False
+        self.hand_pfr_recorded = False
+        
     def setup_game(self):
         """设置游戏 - 6个AI玩家"""
         player_names = [
@@ -134,8 +138,8 @@ class SilentGameRunner:
             self.shark_stats['hands_played'] += 1
             
             # 本手牌VPIP/PFR跟踪（确保一手牌只计算一次）
-            hand_vpip_recorded = False
-            hand_pfr_recorded = False
+            self.hand_vpip_recorded = False
+            self.hand_pfr_recorded = False
             
             # 记录鲨鱼初始筹码
             shark_start_chips = shark.chips if shark else 0
@@ -206,13 +210,13 @@ class SilentGameRunner:
             if shark and current_player.name == shark.name:
                 action_str = str(action).lower().replace('action.', '')
                 # VPIP: 一手牌只计算一次（首次入池）
-                if street == 'preflop' and action_str in ['raise', 'call', 'bet'] and not hand_vpip_recorded:
+                if street == 'preflop' and action_str in ['raise', 'call', 'bet'] and not self.hand_vpip_recorded:
                     self.shark_stats['vpip_count'] += 1
-                    hand_vpip_recorded = True
+                    self.hand_vpip_recorded = True
                 # PFR: 一手牌只计算一次（首次加注）
-                if street == 'preflop' and action_str == 'raise' and not hand_pfr_recorded:
+                if street == 'preflop' and action_str == 'raise' and not self.hand_pfr_recorded:
                     self.shark_stats['pfr_count'] += 1
-                    hand_pfr_recorded = True
+                    self.hand_pfr_recorded = True
                 if action_str == 'fold':
                     self.shark_stats['folds'] += 1
             
