@@ -154,13 +154,13 @@ class AutoGameTester:
         while not game_state.is_betting_round_complete() and action_count < max_actions:
             current_player = game_state.get_current_player()
             if not current_player or not current_player.is_active:
-                game_state.move_to_next_player()
+                game_state.next_player()
                 continue
             
             # 获取AI行动
             action, amount = self._get_ai_action(current_player)
             if action is None:
-                game_state.move_to_next_player()
+                game_state.next_player()
                 continue
             
             # 记录行动
@@ -175,7 +175,7 @@ class AutoGameTester:
             # 执行行动
             success, message, bet_amount = betting_round.process_action(current_player, action, amount)
             if not success:
-                game_state.move_to_next_player()
+                game_state.next_player()
                 continue
             
             action_count += 1
