@@ -236,17 +236,21 @@ class SharkAI:
     5. 对手学习 - 20手后自适应调整
     """
     
+    # Sklansky前3组强牌门槛 (AA/KK/QQ/JJ/AKs/TT/AQs/AJs/KQs/AKo/99/ATs/KJs/QJs/JTs/AQo)
+    # 对应牌力约 >= 0.70
+    TIER3_THRESHOLD = 0.70
+    
     def __init__(self):
-        # 初始使用紧弱(LAP)风格，学习后动态调整
+        # 初始使用紧凶(TAG)风格，只玩前3组强牌，学习后动态调整
         self.base_config = {
-            'vpip_range': (15, 22),
-            'pfr_range': (5, 12),
-            'af_factor': 1.0,
-            'bluff_freq': 0.05,
-            'call_preflop': 0.40,
-            'raise_preflop': 0.10,
-            'bet_postflop': 0.20,
-            'fold_to_raise': 0.50,
+            'vpip_range': (12, 18),      # TAG - 紧：只玩好牌
+            'pfr_range': (10, 16),       # TAG - 凶：多数时候加注而非跟注
+            'af_factor': 2.5,            # 高攻击性
+            'bluff_freq': 0.15,          # 适度诈唬
+            'call_preflop': 0.20,        # 少跟注
+            'raise_preflop': 0.25,       # 多加注
+            'bet_postflop': 0.45,        # 翻牌后积极下注
+            'fold_to_raise': 0.60,       # 面对加注容易弃牌（尊重对手）
             'adaptation_start': 20,
             'learning_rate': 0.1,
         }
@@ -454,51 +458,53 @@ class SharkAI:
     
     def _preflop_decision(self, player, available_actions, amount_to_call,
                          hand_strength, position, spr_guidance, config) -> Tuple[Any, int]:
-        """翻牌前决策"""
+        """翻牌前决策 - TAG风格，只玩Sklansky前3组强牌"""
         from texas_holdem.utils.constants import Action
         
         available_names = [str(a).lower().replace('action.', '') for a in available_actions]
         
-        # 位置调整后的阈值
-        base_threshold = 0.58
-        adjusted_threshold = self.position_awareness.get_adjusted_threshold(base_threshold, position)
+        # TAG风格严格门槛：只玩前3组强牌 (牌力 >= 0.70)
+        # 第1组(0.85+): AA/KK/QQ/JJ/AKs
+        # 第2组(0.75-0.82): TT/AQs/AJs/KQs/AKo  
+        # 第3组(0.68-0.75): 99/ATs/KJs/QJs/JTs/AQo
+        tier3_threshold = self.TIER3_THRESHOLD
         
-        # 深筹码时小对子投机暗三
-        can_set_mine = spr_guidance.get('set_mine', False) and hand_strength >= 0.45
+        # 位置调整（后位可以稍微放宽，但TAG总体很紧）
+        position_multipliers = {'EP': 1.0, 'MP': 0.98, 'CO': 0.95, 'BTN': 0.93, 'SB': 0.98, 'BB': 0.95}
+        adjusted_threshold = tier3_threshold * position_multipliers.get(position, 1.0)
         
-        # 极紧范围（早位）
-        if hand_strength < adjusted_threshold and not can_set_mine:
+        # 牌力不够直接弃牌（除非大盲可以check）
+        if hand_strength < adjusted_threshold:
             if amount_to_call <= 0 and 'check' in available_names:
                 return Action.CHECK, 0
-            if player.is_big_blind and amount_to_call <= 10:
-                return Action.CALL, 0
+            # TAG风格：即使是大盲，弱牌也弃牌，不防守
             return Action.FOLD, 0
         
-        # 中等牌力根据位置和SPR决定
-        if hand_strength < 0.68:
-            if position in ['EP', 'MP'] and amount_to_call > 20:
-                return Action.FOLD, 0
-            if amount_to_call <= 0:
-                return Action.CHECK, 0
-            # 小对子投机
-            if can_set_mine and amount_to_call <= self.effective_stack * 0.05:
-                return Action.CALL, 0
-        
-        # 强牌加注
-        if hand_strength >= 0.70:
+        # 强牌分组决策
+        if hand_strength >= 0.80:  # 第1-2组超强牌 (AA-QQ, AKs, AKo)
             if 'raise' in available_names:
-                raise_amount = max(40, amount_to_call + 20)
+                # TAG风格：大加注施压
+                raise_amount = max(40, amount_to_call + 30)
                 return Action.RAISE, raise_amount
             elif 'bet' in available_names:
                 return Action.BET, 40
         
-        # 其他情况跟注或看牌
-        if amount_to_call <= 0:
-            return Action.CHECK, 0
-        elif 'call' in available_names:
-            return Action.CALL, 0
-        else:
-            return Action.FOLD, 0
+        elif hand_strength >= tier3_threshold:  # 第3组强牌 (JJ, TT, AQs等)
+            if position in ['EP', 'MP']:
+                # 早位：只跟注看翻牌，不暴露牌力
+                if amount_to_call > 0 and 'call' in available_names:
+                    return Action.CALL, 0
+                elif 'check' in available_names:
+                    return Action.CHECK, 0
+            else:
+                # 后位：可以加注偷盲
+                if 'raise' in available_names and amount_to_call <= 20:
+                    return Action.RAISE, 40
+                elif 'call' in available_names:
+                    return Action.CALL, 0
+        
+        # 默认弃牌（TAG不会玩边缘牌）
+        return Action.FOLD, 0
     
     def _postflop_decision(self, player, available_actions, amount_to_call,
                           current_bet, hand_strength, draw_equity, total_equity,
