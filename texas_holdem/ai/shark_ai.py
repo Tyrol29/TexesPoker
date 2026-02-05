@@ -700,7 +700,7 @@ class SharkAI:
     def get_opponent_summary(self) -> str:
         """获取对手分析摘要"""
         if not self.adaptation_active:
-            return "[🦈 鲨鱼AI] 观察中..."
+            return "[鲨鱼AI] 观察中..."
         
         summaries = []
         for name, data in self.opponent_data.items():
@@ -712,5 +712,5 @@ class SharkAI:
                 summaries.append(f"{name}({fold_desc}/{bluff_desc})")
         
         if summaries:
-            return f"[🦈 鲨鱼AI] 分析: {', '.join(summaries)}"
-        return "[🦈 鲨鱼AI] 学习中..."
+            return f"[鲨鱼AI] 分析: {', '.join(summaries)}"
+        return "[鲨鱼AI] 学习中..."
