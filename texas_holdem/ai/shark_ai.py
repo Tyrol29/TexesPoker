@@ -236,9 +236,9 @@ class SharkAI:
     5. 对手学习 - 20手后自适应调整
     """
     
-    # Sklansky前3组强牌门槛 (AA/KK/QQ/JJ/AKs/TT/AQs/AJs/KQs/AKo/99/ATs/KJs/QJs/JTs/AQo)
-    # 对应牌力约 >= 0.70
-    TIER3_THRESHOLD = 0.70
+    # Sklansky前4组强牌门槛 (约前16%的手牌，牌力 >= 0.60)
+    # 前4组包含：AA-88, AKs-A9s, AKo-AJo, KQs-KTs, KQo, QJs-Q9s, QJo, JTs, J9s, T9s
+    TIER3_THRESHOLD = 0.60
     
     def __init__(self):
         # 初始使用紧凶(TAG)风格，只玩前3组强牌，学习后动态调整
@@ -467,21 +467,20 @@ class SharkAI:
         
         available_names = [str(a).lower().replace('action.', '') for a in available_actions]
         
-        # TAG风格严格门槛：只玩前3组强牌 (牌力 >= 0.70)
-        # 第1组(0.85+): AA/KK/QQ/JJ/AKs
-        # 第2组(0.75-0.82): TT/AQs/AJs/KQs/AKo  
-        # 第3组(0.68-0.75): 99/ATs/KJs/QJs/JTs/AQo
-        tier3_threshold = self.TIER3_THRESHOLD
+        # TAG风格：玩Sklansky前4组强牌 (牌力 >= 0.60)，约16%的手牌
+        # 第1-2组(0.80+): AA-QQ, AKs, AKo - 大加注
+        # 第3组(0.70-0.80): JJ-TT, AQs-AJs, KQs, AQo - 标准加注/跟注
+        # 第4组(0.60-0.70): 99-88, ATs-A9s, KJs-KTs, QJs, JTs - 后位加注，早位弃牌
+        tier_threshold = self.TIER3_THRESHOLD
         
-        # 位置调整（后位可以稍微放宽，但TAG总体很紧）
+        # 位置调整（后位放宽）
         position_multipliers = {'EP': 1.0, 'MP': 0.98, 'CO': 0.95, 'BTN': 0.93, 'SB': 0.98, 'BB': 0.95}
-        adjusted_threshold = tier3_threshold * position_multipliers.get(position, 1.0)
+        adjusted_threshold = tier_threshold * position_multipliers.get(position, 1.0)
         
         # 牌力不够直接弃牌（除非大盲可以check）
         if hand_strength < adjusted_threshold:
             if amount_to_call <= 0 and 'check' in available_names:
                 return Action.CHECK, 0
-            # TAG风格：即使是大盲，弱牌也弃牌，不防守
             return Action.FOLD, 0
         
         # 强牌分组决策
@@ -493,21 +492,34 @@ class SharkAI:
             elif 'bet' in available_names:
                 return Action.BET, 40
         
-        elif hand_strength >= tier3_threshold:  # 第3组强牌 (JJ, TT, AQs等)
+        elif hand_strength >= 0.70:  # 第3组强牌 (JJ-TT, AQs等)
             if position in ['EP', 'MP']:
-                # 早位：只跟注看翻牌，不暴露牌力
+                # 早位：跟注看翻牌
                 if amount_to_call > 0 and 'call' in available_names:
                     return Action.CALL, 0
                 elif 'check' in available_names:
                     return Action.CHECK, 0
+                elif 'raise' in available_names:
+                    return Action.RAISE, 40
             else:
-                # 后位：可以加注偷盲
-                if 'raise' in available_names and amount_to_call <= 20:
+                # 后位：加注偷盲
+                if 'raise' in available_names:
                     return Action.RAISE, 40
                 elif 'call' in available_names:
                     return Action.CALL, 0
         
-        # 默认弃牌（TAG不会玩边缘牌）
+        else:  # 第4组中等牌 (0.60-0.70: 99-88, ATs, KJs等)
+            if position in ['CO', 'BTN', 'SB']:  # 只在后位玩
+                if 'raise' in available_names and amount_to_call <= 20:
+                    return Action.RAISE, 40  # 偷盲
+                elif 'call' in available_names and amount_to_call <= 20:
+                    return Action.CALL, 0
+            # 早位弃牌这些牌
+            if amount_to_call <= 0 and 'check' in available_names:
+                return Action.CHECK, 0
+            return Action.FOLD, 0
+        
+        # 默认弃牌
         return Action.FOLD, 0
     
     def _postflop_decision(self, player, available_actions, amount_to_call,
