@@ -888,7 +888,18 @@ class CLI:
                     self.current_hand_bluffs[current_player.name] = True
             else:
                 print(f"行动失败: {message}")
-                continue
+                # 如果是人类玩家，提示重新输入；如果是AI，跳过
+                if not current_player.is_ai:
+                    print("请重新输入行动")
+                    # 不执行 game_state.next_player()，让玩家重新行动
+                    continue
+                else:
+                    # AI玩家行动失败，强制改为弃牌
+                    print(f"{current_player.name} 行动无效，强制弃牌")
+                    action_str = 'fold'
+                    # 执行弃牌
+                    betting_round.process_action(current_player, Action.FOLD, 0)
+                    # 继续到下一个玩家
 
             # 移动到下一个玩家
             game_state.next_player()
