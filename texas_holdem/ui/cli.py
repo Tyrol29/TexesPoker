@@ -242,22 +242,27 @@ class CLI:
         print(f"\n游戏配置: 共{total_players}人 (AI×{ai_count}, 人类×{human_count})")
         print("-"*50)
         
-        # 添加AI玩家（固定1名鲨鱼，其余随机分配风格）
+        # 添加AI玩家（固定1鲨鱼+1松凶+1紧凶，其余随机）
         reserved_names = set()
         available_styles = ['TAG', 'LAG', 'LAP', 'LP']
         style_names = {'TAG': '紧凶', 'LAG': '松凶', 'LAP': '紧弱', 'LP': '松弱'}
         
+        # 固定分配：第1个鲨鱼，第2个松凶，第3个紧凶
+        fixed_assignments = {1: ('SHARK', '鲨鱼'), 2: ('LAG', '松凶'), 3: ('TAG', '紧凶')}
+        
         for i in range(1, ai_count + 1):
-            if i == 1:
-                # 第一个AI固定为鲨鱼
-                style = 'SHARK'
-                style_cn = '鲨鱼'
+            if i in fixed_assignments:
+                # 固定分配的风格
+                style, style_cn = fixed_assignments[i]
             else:
+                # 其余随机分配
                 style = random.choice(available_styles)
                 style_cn = style_names[style]
+            
             ai_name = f"电脑{i}号[{style_cn}]"
             names.append(ai_name)
             reserved_names.add(ai_name)
+            
             if style == 'SHARK':
                 print(f"玩家{i}: {ai_name} (AI-{style_cn}) - 自适应学习AI")
             else:
@@ -3712,13 +3717,19 @@ class CLI:
         
         # 设置玩家类型
         ai_count = 0
+        # 固定分配：第1个鲨鱼，第2个松凶，第3个紧凶
+        fixed_styles = ['SHARK', 'LAG', 'TAG']
+        
         for player in self.game_engine.players:
             if player.name.startswith("电脑"):
                 player.is_ai = True
                 ai_count += 1
-                # 分配风格
-                styles = ['TAG', 'LAG', 'LAP', 'LP']
-                style = random.choice(styles)
+                # 分配风格：前3个固定，其余随机
+                if ai_count <= len(fixed_styles):
+                    style = fixed_styles[ai_count - 1]
+                else:
+                    styles = ['TAG', 'LAG', 'LAP', 'LP']
+                    style = random.choice(styles)
                 player.ai_style = style
                 self.player_styles[player.name] = style
             elif player.name == self.my_player_name:
